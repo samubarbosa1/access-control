@@ -47,6 +47,7 @@ class Pessoa(models.Model):
         null=True,
         validators=[validate_image],  # Adiciona a validação personalizada
     )
+    dentro = models.BooleanField(default=False)
 
     class Meta:
         abstract = True
@@ -87,6 +88,8 @@ class Visitante(Pessoa):
 class Viatura(models.Model):
     modelo = models.CharField(max_length=50)
     tipo = models.CharField(max_length=20)  # Administrativa ou Operacional
+    qr_code = models.UUIDField(unique=True, default=uuid.uuid4, editable=False)
+    dentro = models.BooleanField(default=False)
 
     class Meta:
         abstract = True  # Define como modelo abstrato, não cria tabela no banco
