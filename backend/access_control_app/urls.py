@@ -9,7 +9,9 @@ from .views import (
     registrar_acesso_qr_code,
     registrar_acesso_viatura,
     gerar_relatorio,
-    gerar_relatorio_viaturas
+    gerar_relatorio_viaturas,
+    gerar_relatorio_efetivo,
+    registrar_acesso_pessoa
 )   
 
 router = DefaultRouter()
@@ -26,4 +28,6 @@ urlpatterns = [
     path('registrar-acesso-viatura/', registrar_acesso_viatura, name='registrar_acesso_viatura'),
     path('gerar_relatorio/', gerar_relatorio, name='gerar_relatorio'),
     path('gerar_relatorio_viaturas/', gerar_relatorio_viaturas, name='gerar_relatorio_viaturas'),
+    path('gerar_relatorio_efetivo/', gerar_relatorio_efetivo, name='gerar_relatorio_efetivo'),
+    path('registrar_acesso_pessoa/', registrar_acesso_pessoa, name='registrar_acesso_pessoa'),
 ]

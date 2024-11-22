@@ -125,7 +125,7 @@ class RegistroAcesso(models.Model):
     ]
 
     tipo_acesso = models.CharField(max_length=10, choices=TIPOS_ACESSO)
-    data_hora_entrada = models.DateTimeField(auto_now_add=True)
+    data_hora_entrada = models.DateTimeField(blank=True, null=True)
     data_hora_saida = models.DateTimeField(blank=True, null=True)
     motorista = models.ForeignKey(
         Militar, on_delete=models.SET_NULL, null=True, blank=True, related_name="registros_como_motorista"

@@ -1,4 +1,4 @@
-from rest_framework import viewsets, status
+from rest_framework import viewsets, status, pagination, filters
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from .models import Militar, Visitante, ViaturaAdministrativa, ViaturaOperacional, RegistroAcesso
@@ -9,14 +9,17 @@ from .serializers import (
     ViaturaOperacionalSerializer, 
     RegistroAcessoSerializer
 )
+from django_filters.rest_framework import DjangoFilterBackend
 from django.http import HttpResponse
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Value, DateTimeField
+from django.db.models.functions import Greatest, Coalesce
 from rest_framework.parsers import MultiPartParser, FormParser
 from docx import Document
 from datetime import datetime, timedelta
 from docx.enum.table import WD_TABLE_ALIGNMENT
 import io
+from .filters import RegistroAcessoFilter
 
 
 # ViewSet para Militar
@@ -24,27 +27,55 @@ class MilitarViewSet(viewsets.ModelViewSet):
     queryset = Militar.objects.all()
     serializer_class = MilitarSerializer
     parser_classes = (MultiPartParser, FormParser) 
+    pagination_class = None
 
 # ViewSet para Visitante
 class VisitanteViewSet(viewsets.ModelViewSet):
     queryset = Visitante.objects.all()
     serializer_class = VisitanteSerializer
     parser_classes = (MultiPartParser, FormParser) 
+    pagination_class = None
 
 # ViewSet para Viatura Administrativa
 class ViaturaAdministrativaViewSet(viewsets.ModelViewSet):
     queryset = ViaturaAdministrativa.objects.all()
     serializer_class = ViaturaAdministrativaSerializer
+    pagination_class = None
 
 # ViewSet para Viatura Operacional
 class ViaturaOperacionalViewSet(viewsets.ModelViewSet):
     queryset = ViaturaOperacional.objects.all()
     serializer_class = ViaturaOperacionalSerializer
+    pagination_class = None
+
+
+class RegistroAcessoPagination(pagination.PageNumberPagination):
+    page_size = 20  # Número de itens por página
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 # ViewSet para Registro de Acesso
 class RegistroAcessoViewSet(viewsets.ModelViewSet):
     queryset = RegistroAcesso.objects.all()
     serializer_class = RegistroAcessoSerializer
+    pagination_class = RegistroAcessoPagination
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_class = RegistroAcessoFilter
+
+
+    def get_queryset(self):
+        queryset = RegistroAcesso.objects.all()
+
+        # Anotar o queryset com a data mais recente entre data_hora_entrada e data_hora_saida
+        queryset = queryset.annotate(
+            data_mais_recente=Greatest(
+                Coalesce('data_hora_entrada', Value('1900-01-01 00:00:00', output_field=DateTimeField())),
+                Coalesce('data_hora_saida', Value('1900-01-01 00:00:00', output_field=DateTimeField()))
+            )
+        ).order_by('-data_mais_recente')
+
+        return queryset
+    
 
     # Sobrescrevendo create para lógica personalizada
     def create(self, request, *args, **kwargs):
@@ -72,6 +103,60 @@ class RegistroAcessoViewSet(viewsets.ModelViewSet):
                 )
 
         return super().create(request, *args, **kwargs)
+
+
+@api_view(['POST'])
+def registrar_acesso_pessoa(request):
+    data = request.data
+    tipo_acesso = data['tipo_acesso']
+    observacoes = data['observacoes']
+
+    if(tipo_acesso == "MILITAR"):
+        militar = data['militar']
+        militar = Militar.objects.get(id=militar)
+        if not militar:
+            Response({'error': 'Código não reconhecido'}, status=status.HTTP_400_BAD_REQUEST)
+
+        open_record = RegistroAcesso.objects.filter(
+            militar=militar,
+            data_hora_saida__isnull=True
+        ).last()
+        if open_record:
+            militar.dentro=False
+    
+    elif(tipo_acesso == "VISITANTE"):
+        visitante = data['visitante']
+        visitante = Visitante.objects.get(id=visitante)
+        if not visitante:
+            Response({'error': 'Código não reconhecido'}, status=status.HTTP_400_BAD_REQUEST)
+        open_record = RegistroAcesso.objects.filter(
+            visitante=visitante,
+            data_hora_saida__isnull=True
+        ).last()
+        if open_record:
+            visitante.dentro=False
+
+    if open_record:
+        open_record.data_hora_saida = timezone.now()
+        open_record.save()
+        return Response({'message': 'Saída registrada com sucesso.'}, status=status.HTTP_200_OK)
+    
+    registro = RegistroAcesso(
+        tipo_acesso=tipo_acesso,
+        data_hora_entrada=timezone.now(),
+    )
+    if tipo_acesso == 'MILITAR':
+        militar.dentro = True
+        militar.save()
+        registro.militar = militar
+    elif tipo_acesso == 'VISITANTE':
+        visitante.dentro = True
+        visitante.save()
+        registro.visitante = visitante
+    registro.observacoes = observacoes
+    registro.save()
+    return Response({'message': 'Entrada registrada com sucesso.'}, status=status.HTTP_201_CREATED)
+
 
 
 @api_view(['POST'])
@@ -117,9 +202,11 @@ def registrar_acesso_qr_code(request):
     )
     if tipo_acesso == 'MILITAR':
         militar.dentro = True
+        militar.save()
         registro.militar = militar
     elif tipo_acesso == 'VISITANTE':
-        militar.dentro = True
+        visitante.dentro = True
+        visitante.save()
         registro.visitante = visitante
     registro.save()
     return Response({'message': 'Entrada registrada com sucesso.'}, status=status.HTTP_201_CREATED)
@@ -412,5 +499,139 @@ def gerar_relatorio_viaturas(request):
         content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
     )
     response['Content-Disposition'] = 'attachment; filename=relatorio_viaturas.docx'
+
+    return response
+
+
+@api_view(['GET'])
+def gerar_relatorio_efetivo(request):
+    # Obter parâmetros de filtro
+    data_inicio = request.GET.get('data_inicio')
+    data_fim = request.GET.get('data_fim')
+
+    # Converter strings para objetos datetime
+    try:
+        if data_inicio:
+            data_inicio = datetime.strptime(data_inicio, '%Y-%m-%d').date()
+        if data_fim:
+            data_fim = datetime.strptime(data_fim, '%Y-%m-%d').date()
+    except ValueError:
+        return Response({'error': 'Formato de data inválido. Use YYYY-MM-DD.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Verificar se as datas foram fornecidas
+    if not data_inicio or not data_fim:
+        return Response({'error': 'Por favor, forneça data de início e data de fim.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    # Garantir que data_inicio <= data_fim
+    if data_inicio > data_fim:
+        data_inicio, data_fim = data_fim, data_inicio
+
+    # Gerar lista de datas no intervalo
+    delta = data_fim - data_inicio
+    lista_datas = [data_inicio + timedelta(days=i) for i in range(delta.days + 1)]
+
+    # Gerar o documento Word
+    document = Document()
+    document.add_heading('Relatório de Efetivo', 0)
+
+    # Adicionar detalhes dos filtros
+    filtro_texto = f'Período: De {data_inicio.strftime("%d/%m/%Y")} Até {data_fim.strftime("%d/%m/%Y")}'
+    document.add_paragraph(filtro_texto)
+
+    for data in lista_datas:
+        document.add_heading(f'Dia {data.strftime("%d/%m/%Y")}', level=1)
+
+        # Obter militares e visitantes que estavam dentro no dia
+        registros_dentro = RegistroAcesso.objects.filter(
+            Q(militar__isnull=False) | Q(visitante__isnull=False),
+            data_hora_entrada__date__lte=data,
+        ).exclude(
+            data_hora_saida__date__lt=data
+        )
+
+        militares_dentro_ids = registros_dentro.filter(militar__isnull=False).values_list('militar_id', flat=True).distinct()
+        visitantes_dentro_ids = registros_dentro.filter(visitante__isnull=False).values_list('visitante_id', flat=True).distinct()
+
+        militares_dentro = Militar.objects.filter(id__in=militares_dentro_ids)
+        visitantes_dentro = Visitante.objects.filter(id__in=visitantes_dentro_ids)
+
+        # Obter militares e visitantes que estavam fora no dia
+        militares_todos = Militar.objects.all()
+        visitantes_todos = Visitante.objects.all()
+
+        militares_fora = militares_todos.exclude(id__in=militares_dentro_ids)
+        visitantes_fora = visitantes_todos.exclude(id__in=visitantes_dentro_ids)
+
+        # Listar Militares Dentro
+        document.add_heading('Militares Dentro da OM', level=2)
+        if militares_dentro.exists():
+            table = document.add_table(rows=1, cols=2)
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Nome'
+            hdr_cells[1].text = 'Patente'
+
+            for militar in militares_dentro:
+                row_cells = table.add_row().cells
+                row_cells[0].text = militar.nome
+                row_cells[1].text = militar.patente
+        else:
+            document.add_paragraph('Nenhum militar dentro.')
+
+        # Listar Visitantes Dentro
+        document.add_heading('Visitantes Dentro da OM', level=2)
+        if visitantes_dentro.exists():
+            table = document.add_table(rows=1, cols=2)
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Nome'
+            hdr_cells[1].text = 'CPF'
+
+            for visitante in visitantes_dentro:
+                row_cells = table.add_row().cells
+                row_cells[0].text = visitante.nome
+                row_cells[1].text = visitante.cpf
+        else:
+            document.add_paragraph('Nenhum visitante dentro da OM.')
+
+        # Listar Militares Fora
+        document.add_heading('Militares Fora da OM', level=2)
+        if militares_fora.exists():
+            table = document.add_table(rows=1, cols=2)
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Nome'
+            hdr_cells[1].text = 'Patente'
+
+            for militar in militares_fora:
+                row_cells = table.add_row().cells
+                row_cells[0].text = militar.nome
+                row_cells[1].text = militar.patente
+        else:
+            document.add_paragraph('Nenhum militar fora da OM.')
+
+        # Listar Visitantes Fora
+        document.add_heading('Visitantes Fora da OM', level=2)
+        if visitantes_fora.exists():
+            table = document.add_table(rows=1, cols=2)
+            hdr_cells = table.rows[0].cells
+            hdr_cells[0].text = 'Nome'
+            hdr_cells[1].text = 'CPF'
+
+            for visitante in visitantes_fora:
+                row_cells = table.add_row().cells
+                row_cells[0].text = visitante.nome
+                row_cells[1].text = visitante.cpf
+        else:
+            document.add_paragraph('Nenhum visitante fora da OM.')
+
+    # Salvar o documento em um buffer de memória
+    buffer = io.BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+
+    # Retornar o documento como uma resposta HTTP
+    response = HttpResponse(
+        buffer.getvalue(),
+        content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    )
+    response['Content-Disposition'] = 'attachment; filename=relatorio_efetivo.docx'
 
     return response
